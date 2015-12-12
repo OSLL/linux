@@ -18,9 +18,17 @@ static void noop_merged_requests(struct request_queue *q, struct request *rq,
 	list_del_init(&next->queuelist);
 }
 
+int c = 0;
+
 static int noop_dispatch(struct request_queue *q, int force)
 {
 	struct noop_data *nd = q->elevator->elevator_data;
+    
+    if (c++ > 500)
+    {
+        c = 0;
+        return 0;
+    }
 
 	if (!list_empty(&nd->queue)) {
 		struct request *rq;
