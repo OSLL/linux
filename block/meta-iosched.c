@@ -9,6 +9,7 @@
 
 struct queue_arr {
 	struct request_queue **queues;
+	int *stats;
 	int n_queues;
 	int size;
 };
@@ -20,7 +21,6 @@ int n_disks = 0;
 int disks_size = 0;
 
 bool add_my_disk(struct gendisk* disk) {
-	printk("aaaaa, disk %s will be added. N disks: %d\n", disk->disk_name, n_disks);
 	if (disks_size > n_disks) {
 		disks[n_disks++] = disk;
 		return true;
@@ -61,31 +61,30 @@ struct request_queue* get_queue_by_name(char *name) {
 
 struct kobject *group_kobj;
 
-static int interval;
-static int ratio;
+static int interval = 10000;
+static int ratio = 80;
 static int low_prio; // need these variables only for making kobj_attributes with good names
 static int high_prio;
 static int stats;
 
+
+int whole_prio_stat = 0;
+spinlock_t prio_stat_lock;
+DEFINE_SPINLOCK(prio_stat_lock);
+
 static ssize_t interval_show(struct kobject *kobj, struct kobj_attribute *attr,
 			char *buf)
 {
-	printk("interval_show %d\n", interval);
 	return sprintf(buf, "%d\n", interval);
 }
 
 static ssize_t interval_store(struct kobject *kobj, struct kobj_attribute *attr,
 			 const char *buf, size_t count)
 {
-	int ret;
-	printk("interval_store was %d\n", interval);
+	int ret = kstrtoint(buf, 10, &interval);
+	if (interval < 100) interval = 10000;
 
-	ret = kstrtoint(buf, 10, &interval);
-	printk("interval_store is now %d\n", interval);
-
-	if (ret < 0)
-		return ret;
-
+	if (ret < 0) return ret;
 	return count;
 }
 
@@ -98,20 +97,17 @@ static ssize_t ratio_show(struct kobject *kobj, struct kobj_attribute *attr,
 static ssize_t ratio_store(struct kobject *kobj, struct kobj_attribute *attr,
 			 const char *buf, size_t count)
 {
-	int ret;
+	int ret = kstrtoint(buf, 10, &ratio);
+	if (ratio <= 0) ratio = 20;
 
-	ret = kstrtoint(buf, 10, &ratio);
-	if (ret < 0)
-		return ret;
-
+	if (ret < 0) return ret;
 	return count;
 }
 
 static ssize_t high_prio_show(struct kobject *kobj, struct kobj_attribute *attr,
                         char *buf)
 {
-	int i;
-	int buf_ptr = 0;
+	int i, buf_ptr = 0;
 	for (i = 0; i < all.n_queues; i++)
 		if (all.queues[i]->has_priority) {
 			buf_ptr += sprintf(buf + buf_ptr, "%s\n", get_disk_name(all.queues[i]));
@@ -123,20 +119,22 @@ static ssize_t high_prio_store(struct kobject *kobj, struct kobj_attribute *attr
                          const char *buf, size_t count)
 {
 	struct request_queue *q = get_queue_by_name(buf);
-	if (q)
-		q->has_priority = true;
-	else
-		printk("aaaaa wtf high cannot understand %s!!!\n", buf);
-        printk("aaaaa high trying to add %s\n", buf);
-        return count;
+	if (q) {
+		if (!q->has_priority) {
+			spin_lock(&prio_stat_lock);
+			q->has_priority = true;
+			whole_prio_stat += q->stats[0] + q->stats[1];
+			spin_unlock(&prio_stat_lock);
+		}
+	}
+	return count;
 }
 
 
 static ssize_t low_prio_show(struct kobject *kobj, struct kobj_attribute *attr,
                         char *buf)
 {
-	int i;
-	int buf_ptr = 0;
+	int i, buf_ptr = 0;
 	for (i = 0; i < all.n_queues; i++)
 		if (!all.queues[i]->has_priority) {
 			buf_ptr += sprintf(buf + buf_ptr, "%s\n", get_disk_name(all.queues[i]));
@@ -148,15 +146,18 @@ static ssize_t low_prio_store(struct kobject *kobj, struct kobj_attribute *attr,
                          const char *buf, size_t count)
 {
 	struct request_queue *q = get_queue_by_name(buf);
-	if (q)
-		q->has_priority = false;
-	else
-		printk("aaaaa wtf low cannot understand %s!!!\n", buf);
-        printk("aaaaa low trying to add %s\n", buf);
-        return count;
+	if (q) {
+		if (q->has_priority) {
+			spin_lock(&prio_stat_lock);
+			whole_prio_stat -= q->stats[0] + q->stats[1];
+			q->has_priority = false;
+			spin_unlock(&prio_stat_lock);
+		}
+	}
+	return count;
 }
 
-char my_stats[1000];
+char my_stats[10000];
 
 static ssize_t stats_show(struct kobject *kobj, struct kobj_attribute *attr,
 			char *buf)
@@ -201,20 +202,23 @@ static struct attribute_group attr_group = {
 
 int kobj_init(void) {
 	group_kobj = kobject_create_and_add("group-iosched", block_depr);
-	if (!group_kobj)
-		return -ENOMEM;
+
+	if (!group_kobj) return -ENOMEM;
 	return sysfs_create_group(group_kobj, &attr_group);
 }
 
 bool add_queue(struct request_queue *q) {
 	if (all.size > all.n_queues) {
+		all.stats[all.n_queues] = 0;
 		all.queues[all.n_queues++] = q;
 		return true;
 	}
 
+	all.stats = krealloc(all.stats, (all.n_queues + 1) * 2 * sizeof(int), GFP_KERNEL);
 	all.queues = krealloc(all.queues, (all.n_queues + 1) * 2 * sizeof(q), GFP_KERNEL);
-	if (!all.queues) return false;
+	if (!all.queues || !all.stats) return false;
 	all.size = (all.n_queues + 1) * 2;
+	all.stats[all.n_queues] = 0;
 	all.queues[all.n_queues++] = q;
 	return true;
 }
@@ -231,22 +235,47 @@ bool del_queue(struct request_queue *q) {
 	pos = find_queue(all, q);
 	if (pos == -1) return false;
 	all.queues[pos] = all.queues[all.n_queues - 1];
+	all.stats[pos] = all.stats[all.n_queues - 1];
 	all.n_queues--;
 	return true;
 }
 
 int whole_stat = 0;
 
-void print_stats(unsigned long unused) {
-	int i;
-	int printed = sprintf(my_stats, "aaaaa time=%u\tid\tload\tpercent\t(whole=%d)\n",
-				jiffies, whole_stat);
-	// all numbers will not be matched because of continuing of IO processes
-	// there need a synchronization for an ideal statistics
+// Trying to get shapshot from all our queue statistics.
+// while(honest--) is something like while(true)
+// but performance is much more important than absolute honesty
+int get_snapshot(int honest) {
+	bool success;
+	int i, n_try = 0;
+
 	for (i = 0; i < all.n_queues; i++) {
-		int t = all.queues[i]->stats[0] + all.queues[i]->stats[1] + all.queues[i]->stats[2];
-		printed += sprintf(my_stats + printed, "aaaaa \t\t%d\t%d\t%d\n",
-			all.queues[i]->id, t, t * 100 / (whole_stat + 1));
+		all.stats[i] = all.queues[i]->stats[2];
+	}
+
+	while(n_try < honest) {
+		success = true;
+		for (i = 0; i < all.n_queues; i++) {
+			if (all.stats[i] != all.queues[i]->stats[2]) {
+				success = false;
+				all.stats[i] = all.queues[i]->stats[2];
+			}
+		}
+		if (success) return n_try;
+		n_try++;
+	}
+	return n_try;
+}
+
+void print_stats(unsigned long unused) {
+	int i, printed, n_try = get_snapshot(20);
+
+	printed = sprintf(my_stats,
+		"aaa time=%u\tid\tload\tpercent\t(whole=%d, try=%d, whole_prio=%d)\n",
+				jiffies, whole_stat, n_try, whole_prio_stat);
+	for (i = 0; i < all.n_queues; i++) {
+		printed += sprintf(my_stats + printed, "aaa \t\t\t%d\t%d\t%d\n",
+			all.queues[i]->id, all.stats[i], all.stats[i] * 100 / (whole_stat + 1));
 	}
 	my_stats[printed] = 0;
 	printk(my_stats);
@@ -257,10 +286,10 @@ void print_stats(unsigned long unused) {
 // Otherwise it calculates amount of time to sleep
 int calc_time_to_sleep(struct request_queue *q) {
 	int i;
-	if (q->has_priority) return 0; // This queue has priority
+	if (q->has_priority || whole_prio_stat * 100 / whole_stat >= ratio) return 0;
 	for (i = 0; i < all.n_queues; i++) {
 		if (all.queues[i]->has_priority && all.queues[i]->nr_pending > 0)
-			return 10; //Bad magician constant
+			return interval / 100;
 	}
 	return 0;
 }
@@ -271,12 +300,21 @@ spinlock_t stat_lock;
 DEFINE_SPINLOCK(stat_lock);
 
 void clean_up(unsigned long unused) {
-	int i;
-	int level = (group + 1) % 3;
+	int i, level = group ^ 1;
 	for (i = 0; i < all.n_queues; i++) {
 		spin_lock(&stat_lock);
 		whole_stat -= all.queues[i]->stats[level];
 		spin_unlock(&stat_lock);
+
+		spin_lock(all.queues[i]->queue_lock);
+		all.queues[i]->stats[2] -= all.queues[i]->stats[level];
+		spin_unlock(all.queues[i]->queue_lock);
+
+		if (all.queues[i]->has_priority) {
+			spin_lock(&prio_stat_lock);
+			whole_prio_stat -= all.queues[i]->stats[level];
+			spin_unlock(&prio_stat_lock);
+		}
 		all.queues[i]->stats[level] = 0;
 	}
 	group = level;
@@ -287,14 +325,22 @@ void update_stats(struct request_queue *q) {
 	spin_lock(&stat_lock);
 	whole_stat++;
 	spin_unlock(&stat_lock);
+
+	if (q->has_priority) {
+		spin_lock(&prio_stat_lock);
+		whole_prio_stat++;
+		spin_unlock(&prio_stat_lock);
+	}
+
 	q->stats[group]++;
+	q->stats[2]++;
 }
 
 struct timer_list my_timer;
 
 void init_my_timer(void) {
 	init_timer(&my_timer);
-	my_timer.expires = jiffies + 10 * HZ; // after 10 seconds
+	my_timer.expires = jiffies + interval * HZ / 1000;
 	my_timer.data = 0;
 	my_timer.function = print_stats;
 	add_timer(&my_timer);
@@ -304,8 +350,11 @@ struct timer_list my_switch_timer;
 
 void init_my_switch_timer(void) {
 	init_timer(&my_switch_timer);
-	my_switch_timer.expires = jiffies + 4 * HZ; // 3 buffers. Current stat is 10 seconds
-	// 4 means piece of stat from 8 to 12 seconds.
+	// We have 2 buffers with partial statistics. We want to have statistics from the last
+	// interval of time. Imagine interval = 1.5 * x. We are able to get statistics from x to 2 * x
+	// moment. So we need to switch our timer every interval * 2 / 3 / 1000 seconds
+	// (interval storing time in msecs)
+	my_switch_timer.expires = jiffies + interval * HZ * 2 / 3000;
 	my_switch_timer.data = 0;
 	my_switch_timer.function = clean_up;
 	add_timer(&my_switch_timer);
