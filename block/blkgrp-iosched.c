@@ -1,5 +1,5 @@
 /*
- * elevator olya
+ * Blk Group scheduler
  */
 #include <linux/blkdev.h>
 #include <linux/elevator.h>
@@ -10,21 +10,21 @@
 
 #include "meta-iosched.h"
 
-struct noop_data {
+struct blkgrp_data {
 	struct list_head queue;
 	struct request_queue *q;
 };
 
-static void noop_merged_requests(struct request_queue *q, struct request *rq,
+static void blkgrp_merged_requests(struct request_queue *q, struct request *rq,
 				 struct request *next)
 {
 	list_del_init(&next->queuelist);
 }
 
-static int noop_dispatch(struct request_queue *q, int force)
+static int blkgrp_dispatch(struct request_queue *q, int force)
 {
 	struct request *rq;
-	struct noop_data *nd = q->elevator->elevator_data;
+	struct blkgrp_data *nd = q->elevator->elevator_data;
 	update_stats(q);
 
 	if (!list_empty(&nd->queue)) {
@@ -41,16 +41,16 @@ static int noop_dispatch(struct request_queue *q, int force)
 	return 0;
 }
 
-static void noop_add_request(struct request_queue *q, struct request *rq)
+static void blkgrp_add_request(struct request_queue *q, struct request *rq)
 {
-	struct noop_data *nd = q->elevator->elevator_data;
+	struct blkgrp_data *nd = q->elevator->elevator_data;
 	list_add_tail(&rq->queuelist, &nd->queue);
 }
 
 static struct request *
-noop_former_request(struct request_queue *q, struct request *rq)
+blkgrp_former_request(struct request_queue *q, struct request *rq)
 {
-	struct noop_data *nd = q->elevator->elevator_data;
+	struct blkgrp_data *nd = q->elevator->elevator_data;
 
 	if (rq->queuelist.prev == &nd->queue)
 		return NULL;
@@ -58,9 +58,9 @@ noop_former_request(struct request_queue *q, struct request *rq)
 }
 
 static struct request *
-noop_latter_request(struct request_queue *q, struct request *rq)
+blkgrp_latter_request(struct request_queue *q, struct request *rq)
 {
-	struct noop_data *nd = q->elevator->elevator_data;
+	struct blkgrp_data *nd = q->elevator->elevator_data;
 
 	if (rq->queuelist.next == &nd->queue)
 		return NULL;
@@ -69,9 +69,9 @@ noop_latter_request(struct request_queue *q, struct request *rq)
 
 bool first_time = true;
 
-static int noop_init_queue(struct request_queue *q, struct elevator_type *e)
+static int blkgrp_init_queue(struct request_queue *q, struct elevator_type *e)
 {
-	struct noop_data *nd;
+	struct blkgrp_data *nd;
 	struct elevator_queue *eq;
 	if (first_time) {
 		first_time = false;
@@ -102,9 +102,9 @@ static int noop_init_queue(struct request_queue *q, struct elevator_type *e)
 	return 0;
 }
 
-static void noop_exit_queue(struct elevator_queue *e)
+static void blkgrp_exit_queue(struct elevator_queue *e)
 {
-	struct noop_data *nd = e->elevator_data;
+	struct blkgrp_data *nd = e->elevator_data;
 
 	del_queue(nd->q);
 
@@ -112,34 +112,34 @@ static void noop_exit_queue(struct elevator_queue *e)
 	kfree(nd);
 }
 
-static struct elevator_type elevator_noop = {
+static struct elevator_type elevator_blkgrp = {
 	.ops = {
-		.elevator_merge_req_fn		= noop_merged_requests,
-		.elevator_dispatch_fn		= noop_dispatch,
-		.elevator_add_req_fn		= noop_add_request,
-		.elevator_former_req_fn		= noop_former_request,
-		.elevator_latter_req_fn		= noop_latter_request,
-		.elevator_init_fn		= noop_init_queue,
-		.elevator_exit_fn		= noop_exit_queue,
+		.elevator_merge_req_fn		= blkgrp_merged_requests,
+		.elevator_dispatch_fn		= blkgrp_dispatch,
+		.elevator_add_req_fn		= blkgrp_add_request,
+		.elevator_former_req_fn		= blkgrp_former_request,
+		.elevator_latter_req_fn		= blkgrp_latter_request,
+		.elevator_init_fn		= blkgrp_init_queue,
+		.elevator_exit_fn		= blkgrp_exit_queue,
 	},
-	.elevator_name = "olya",
+	.elevator_name = "blkgrp",
 	.elevator_owner = THIS_MODULE,
 };
 
-static int __init noop_init(void)
+static int __init blkgrp_init(void)
 {
-	return elv_register(&elevator_noop);
+	return elv_register(&elevator_blkgrp);
 }
 
-static void __exit noop_exit(void)
+static void __exit blkgrp_exit(void)
 {
-	elv_unregister(&elevator_noop);
+	elv_unregister(&elevator_blkgrp);
 }
 
-module_init(noop_init);
-module_exit(noop_exit);
+module_init(blkgrp_init);
+module_exit(blkgrp_exit);
 
 
-MODULE_AUTHOR("Jens Axboe");
+MODULE_AUTHOR("CSC");
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("Olya IO scheduler");
+MODULE_DESCRIPTION("Blk Group I/O scheduler");
